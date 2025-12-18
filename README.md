@@ -22,12 +22,13 @@ The benchmark measures the impact of PyramidKV on:
 
 ## 3. How to Run
 
-Ensure you are in the project root directory and using the configured `nlp` conda environment.
+Ensure you are in the project root directory and have the necessary dependencies installed. You can install them using:
 
 ```bash
-# Activate the environment
-conda activate nlp
+pip install -r requirements.txt
+```
 
+```bash
 # Run the benchmark script
 python benchmark_pyramid_pythia.py
 ```
@@ -42,9 +43,11 @@ The following results compare **Pythia-2.8B (Baseline)** vs. **Pythia-2.8B + Pyr
 | **PG-19 PPL** | 12.1328 | 12.1328 | **+0.00% (Lossless)** |
 | **KV Cache Memory** | 1.92 GB | **0.49 GB** | **-74.57% (Reduction)** |
 | **Max Memory** | 9.50 GB | 7.21 GB | **-24.12% (Reduction)** |
-| **TPOT (Generation Time)** | 1.73 s | **0.32 s** | **-81.27% (Faster)** |
-| **Throughput** | 0.58 tok/s | **3.08 tok/s** | **+433.98% (Higher)** |
-| **TTFT (Prefill Time)** | 3.02 s | 9.38 s | -210.71% (Slower) |
+| **TPOT (Generation Time)** | 1.83 s | **0.40 s** | **-78.35% (Faster)** |
+| **Throughput** | 0.54 tok/s | **2.51 tok/s** | **+361.98% (Higher)** |
+| **TTFT (Prefill Time)** | 2.65 s | 8.94 s | -237.43% (Slower) |
+
+
 ![alt text](result.png)
 ### Key Findings
 *   **Significant Memory Savings**: PyramidKV reduces the KV Cache size by approximately **75%**, drastically lowering the memory requirement for long-context generation.
