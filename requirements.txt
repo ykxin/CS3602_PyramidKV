@@ -15,3 +15,4 @@ openai
 anthropic
 seaborn
 matplotlib
+datasets<3.0.0

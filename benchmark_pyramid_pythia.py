@@ -147,7 +147,7 @@ def load_data(tokenizer):
         print(f"Failed to load WikiText: {e}")
         wikitext_text = "This is a fallback text for WikiText. " * 1000
 
-    # PG-19 (Simulated with extended WikiText if fails)
+    # PG-19
     try:
         # Try loading a small subset or streaming
         pg19 = load_dataset("deepmind/pg19", split="validation", streaming=True, trust_remote_code=True)
@@ -155,9 +155,32 @@ def load_data(tokenizer):
         pg19_sample = next(pg19_iter)['text']
         print(f"PG-19 sample loaded (len: {len(pg19_sample)})")
     except Exception as e:
-        print(f"Failed to load PG-19 (using extended WikiText): {e}")
-        # Create a long text from WikiText (repeat 5 times ~ 1M chars)
-        pg19_sample = wikitext_text * 5
+        print(f"Failed to load PG-19: {e}")
+        print("Falling back to WikiText-103 as proxy...")
+        try:
+            wt103 = load_dataset("wikitext", "wikitext-103-raw-v1", split="test", streaming=True)
+            wt103_iter = iter(wt103)
+            # Skip first few articles to avoid overlap with WikiText-2 (which is a subset)
+            for _ in range(10): 
+                try:
+                    next(wt103_iter)
+                except StopIteration:
+                    break
+            
+            pg19_sample = ""
+            # Accumulate enough text
+            while len(pg19_sample) < 100000:
+                try:
+                    pg19_sample += next(wt103_iter)['text'] + "\n"
+                except StopIteration:
+                    break
+            print(f"WikiText-103 loaded as proxy (len: {len(pg19_sample)})")
+        except Exception as e2:
+            print(f"Failed to load WikiText-103: {e2}")
+            # Create a long text from WikiText (repeat 5 times ~ 1M chars)
+            # Offset to avoid identical evaluation if both look at start
+            print("Using extended WikiText-2 with offset...")
+            pg19_sample = (wikitext_text * 5)[10000:]
         
     return wikitext_text, pg19_sample
 
