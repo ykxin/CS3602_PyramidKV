@@ -14,35 +14,70 @@ import gc
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 def get_ppl(model, tokenizer, text, stride=512, device="cuda"):
+    """
+    Evaluates PPL using a Chunked Context-Target approach to properly test PyramidKV compression.
+    Instead of a sliding window that might reset compression state, we split the text into chunks.
+    Each chunk is split into Context (Prompt) and Target.
+    Context is processed to generate compressed KV cache.
+    Target is evaluated using that compressed cache.
+    """
     encodings = tokenizer(text, return_tensors="pt")
-    max_length = model.config.max_position_embeddings
-    seq_len = encodings.input_ids.size(1)
-
+    input_ids = encodings.input_ids
+    total_len = input_ids.size(1)
+    
+    # Configuration for Chunked Evaluation
+    # We use a chunk size of 2048 (standard for Pythia/GPT-NeoX)
+    # Context: 1536 tokens (75%), Target: 512 tokens (25%)
+    seq_len = 2048
+    split_idx = int(seq_len * 0.75)
+    
     nlls = []
-    prev_end_loc = 0
     
-    print(f"Evaluating PPL on sequence length: {seq_len} with stride {stride}")
+    print(f"Evaluating PPL with Chunk Size {seq_len}, Context Split {split_idx}...")
     
-    # Sliding window evaluation
-    for begin_loc in range(0, seq_len, stride):
-        end_loc = min(begin_loc + max_length, seq_len)
-        trg_len = end_loc - prev_end_loc
+    # Iterate through text in non-overlapping chunks (or with stride if needed)
+    # Using non-overlapping chunks for efficiency and independence
+    count = 0
+    for i in range(0, total_len, seq_len):
+        chunk_ids = input_ids[:, i : i + seq_len].to(device)
         
-        if end_loc - begin_loc < 2:
+        # Skip if chunk is too short to have a meaningful context+target split
+        if chunk_ids.size(1) < seq_len:
             break
             
-        input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
-        target_ids = input_ids.clone()
-        target_ids[:, :-trg_len] = -100
-
+        context_ids = chunk_ids[:, :split_idx]
+        target_ids = chunk_ids[:, split_idx:]
+        
+        # 1. Process Context (Trigger Compression)
+        # This simulates reading a long document/prompt
         with torch.no_grad():
-            outputs = model(input_ids, labels=target_ids)
-            neg_log_likelihood = outputs.loss
-
+            outputs = model(context_ids, use_cache=True)
+            past_key_values = outputs.past_key_values
+            
+        # 2. Process Target (Evaluate with Compressed Context)
+        # We compute the likelihood of target_ids given context
+        # We need correct position_ids for RoPE
+        past_length = context_ids.size(1)
+        target_length = target_ids.size(1)
+        position_ids = torch.arange(past_length, past_length + target_length, dtype=torch.long, device=device).unsqueeze(0)
+        
+        with torch.no_grad():
+            # Pass labels=target_ids to compute loss. 
+            # Note: The model shifts labels internally, so it predicts target_ids[1:] given target_ids[:-1] and context.
+            # The first token of target_ids is used as input, but its prediction is not part of the loss (usually).
+            outputs_ppl = model(
+                target_ids,
+                past_key_values=past_key_values,
+                position_ids=position_ids,
+                labels=target_ids
+            )
+            neg_log_likelihood = outputs_ppl.loss
+            
         nlls.append(neg_log_likelihood)
-
-        prev_end_loc = end_loc
-        if end_loc == seq_len:
+        count += 1
+        
+        # Limit evaluation to save time if text is huge (e.g. max 50 chunks)
+        if count >= 50:
             break
 
     if not nlls:
@@ -52,6 +87,9 @@ def get_ppl(model, tokenizer, text, stride=512, device="cuda"):
     return ppl.item()
 
 def benchmark_speed(model, tokenizer, prompt, new_tokens=100, device="cuda"):
+    """
+    Benchmarks TTFT, TPOT, and Memory usage with correct cache reuse.
+    """
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
     input_ids = inputs.input_ids
     
@@ -67,18 +105,17 @@ def benchmark_speed(model, tokenizer, prompt, new_tokens=100, device="cuda"):
     _ = model.generate(input_ids, max_new_tokens=10, use_cache=True, pad_token_id=tokenizer.eos_token_id)
     torch.cuda.synchronize()
     
-    # Measure memory after warmup (should contain cache for warmup)
-    # But we want to measure cache for the MAIN run.
-    
     # Clear cache from warmup
     torch.cuda.empty_cache()
     
-    # TTFT (Time To First Token) - Prefill
+    # 1. TTFT (Time To First Token) - Prefill
     print("Measuring TTFT...")
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
+    
     with torch.no_grad():
         outputs = model(input_ids, use_cache=True)
+    
     torch.cuda.synchronize()
     ttft = time.time() - start_time
     
@@ -86,20 +123,18 @@ def benchmark_speed(model, tokenizer, prompt, new_tokens=100, device="cuda"):
     mem_after_prefill = torch.cuda.memory_allocated()
     kv_cache_mem_est = (mem_after_prefill - start_mem) / (1024**3) # GB (Approx)
     print(f"Memory after prefill: {mem_after_prefill / 1024**3:.4f} GB")
-
-    # TPOT (Time Per Output Token)
+    
+    # 2. TPOT (Time Per Output Token)
     print(f"Generating {new_tokens} tokens for TPOT measurement...")
-    # Note: model.generate will re-run prefill if we pass input_ids.
-    # To avoid re-running prefill and use the existing cache, we should pass past_key_values.
-    # But outputs.past_key_values contains the cache from prefill.
     
     past_key_values = outputs.past_key_values
-    
-    # Generate using past_key_values
-    # We need to pass the LAST token of input_ids as the start for generation
     last_token = input_ids[:, -1:]
     
+    # We need to correctly handle position_ids if we generate manually, 
+    # but model.generate handles it if we pass past_key_values.
+    
     start_time = time.time()
+    
     # Using past_key_values avoids re-computation of prefill
     gen_output = model.generate(
         last_token, 
@@ -108,19 +143,18 @@ def benchmark_speed(model, tokenizer, prompt, new_tokens=100, device="cuda"):
         use_cache=True, 
         pad_token_id=tokenizer.eos_token_id
     )
+    
     torch.cuda.synchronize()
     total_gen_time = time.time() - start_time
     
-    # gen_output will contain [last_token, new_tokens...]
-    gen_tokens = gen_output.shape[1] - 1 # Subtract the input token
+    # gen_output contains [last_token, new_tokens...]
+    gen_tokens = gen_output.shape[1] - 1 
     
     tpot = total_gen_time / gen_tokens if gen_tokens > 0 else 0
     throughput = gen_tokens / total_gen_time
     
-    # FLOPS estimation (Only for generation part)
-    # Prefill FLOPS are not included in this throughput
+    # FLOPS estimation
     num_params = sum(p.numel() for p in model.parameters())
-    # For generation: 2 * N * tokens
     total_flops = 2 * num_params * gen_tokens
     flops_achieved = total_flops / total_gen_time
     

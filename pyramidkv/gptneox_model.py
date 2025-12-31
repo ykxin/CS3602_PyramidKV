@@ -88,10 +88,10 @@ def gptneox_attn_forward_PyramidKV(
         )
         
         # Debug Print (Only print once per layer or infrequently to avoid spam, but for benchmark once is fine)
-        if self.layer_idx == 0 and torch.distributed.is_initialized() == False:
-            print(f"PyramidKV: Layer 0 compressed KV from {key.shape[-2]} to {key_compress.shape[-2]}")
-        elif self.layer_idx == 0:
-            pass # Avoid distributed print spam
+        # if self.layer_idx == 0 and torch.distributed.is_initialized() == False:
+        #     print(f"PyramidKV: Layer 0 compressed KV from {key.shape[-2]} to {key_compress.shape[-2]}")
+        # elif self.layer_idx == 0:
+        #     pass # Avoid distributed print spam
         
         # Use the compressed KV as the new 'present' (which will be layer_past for next step)
         present = (key_compress, value_compress) if use_cache else None
